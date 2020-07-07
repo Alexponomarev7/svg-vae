@@ -5,8 +5,6 @@ train
 venv
 data_test
 data_train
-data_test.parquet
-data_train.parquet
 font.ipynb
 save.svg
 tmp.sfd
