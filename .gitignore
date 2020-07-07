@@ -10,3 +10,6 @@ data_train.parquet
 font.ipynb
 save.svg
 tmp.sfd
+.DS_Store
+.idea
+__pycache__
