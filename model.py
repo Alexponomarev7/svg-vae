@@ -8,6 +8,7 @@ import numpy as np
 import os
 import torch.distributions as td
 import math
+from extern.normalization import CategoricalConditionalBatchNorm
 
 
 def get_same_padding(size, kernel_size, stride):
@@ -56,13 +57,12 @@ class VisualEncoderCell(nn.Module):
                                 stride=stride)
 
         # Move to CONDITIONAL INSTANCE NORM 2D
-        self.instance_norm = nn.InstanceNorm2d(num_features=20)
+        self.instance_norm = CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
-    def forward(self, input):
+    def forward(self, input, labels):
         conv2d = self.conv2d(input)
-        #print(conv2d.shape)
-        instance_norm = self.instance_norm(conv2d)
+        instance_norm = self.instance_norm(conv2d, labels)
         return self.relu(instance_norm)
 
 
@@ -85,9 +85,14 @@ class VisualEncoderModel(nn.Module):
         self.flatten = Flatten()
         self.dense = nn.Linear(1024, 2 * config.bottleneck_bits)
 
-    def forward(self, input):
-        flatten = self.flatten(self.block6(self.block5(
-            self.block4(self.block3(self.block2(self.block1(input)))))))
+    def forward(self, input, labels):
+        out = self.block1(input, labels)
+        out = self.block2(out, labels)
+        out = self.block3(out, labels)
+        out = self.block4(out, labels)
+        out = self.block5(out, labels)
+        out = self.block6(out, labels)
+        flatten = self.flatten(out)
         #print(flatten.shape)
         return self.dense(flatten)
 
@@ -103,13 +108,13 @@ class VisualDecoderCell(nn.Module):
                                          output_padding=output_padding,
                                          stride=stride)
 
-        self.instance_norm = nn.InstanceNorm2d(20)
+        self.instance_norm = CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
-    def forward(self, input):
+    def forward(self, input, labels):
         conv2d = self.conv2d(input)
         #print(conv2d.shape)
-        instance_norm = self.instance_norm(conv2d)
+        instance_norm = self.instance_norm(conv2d, labels)
         return self.relu(instance_norm)
 
 
@@ -132,11 +137,17 @@ class VisualDecoderModel(nn.Module):
                                 kernel_size=5,
                                 padding=2)
 
-    def forward(self, input):
+    def forward(self, input, labels):
         out = self.dense(input)
         out = out.reshape(-1, 64, 4, 4)
         #print(200, out.shape)
-        out = self.block7(self.block6(self.block5(self.block4(self.block3(self.block2(self.block1(out)))))))
+        out = self.block1(out, labels)
+        out = self.block2(out, labels)
+        out = self.block3(out, labels)
+        out = self.block4(out, labels)
+        out = self.block5(out, labels)
+        out = self.block6(out, labels)
+        out = self.block7(out, labels)
         out = self.conv2d(out)
         #print("HI", out.shape)
         return out
@@ -152,25 +163,23 @@ class VAEModel(nn.Module):
 
     def loss(self, logits, features):
         # logits should be dict with 'outputs', which is image.
-        targets = features['targets'].reshape(-1, 64, 64, 1)
-        weights = targets  # ???
+        targets = features.reshape(-1, 1, 64, 64)
+        weights = torch.ones_like(targets)
         loss_num = torch.pow(logits - targets, 2)
         return torch.sum(loss_num * weights), torch.sum(weights)
 
-    def forward(self, inputs):
-        # inputs, targets = features['inputs'], features['targets']
-        features = {}
-        #print(inputs.shape)
-        #print(inputs.dtype)
-        enc_out = self.encoder(inputs)
+    def forward(self, inputs, labels, bottleneck=None):
+        targets = inputs
+
+        enc_out = self.encoder(inputs, labels)
         enc_out = enc_out.reshape(-1, 2 * self.config.bottleneck_bits)
 
         # bottleneck
         sampled_bottleneck, b_loss = self.bottleneck(enc_out)
         losses = {'bottleneck_kl': torch.mean(b_loss)}
 
-        if 'bottleneck' in features:
-            if features['bottleneck'].shape[0] == 0:
+        if not (bottleneck is None):
+            if bottleneck.shape[0] == 0:
                 # return bottleneck for interpolation
                 # set losses['training'] = 0 so top() isn't called on it
                 # potential todo: use losses dict so we have kl_loss here for non stop
@@ -178,13 +187,13 @@ class VAEModel(nn.Module):
                 return sampled_bottleneck, {'training': 0.0}
             else:
                 # we want to use the given bottleneck
-                sampled_bottleneck = features['bottleneck']
+                sampled_bottleneck = bottleneck
 
         # finalize bottleneck
         unbottleneck = sampled_bottleneck
 
         # decoder.
-        dec_out = self.decoder(unbottleneck)
+        dec_out = self.decoder(unbottleneck, labels)
         dec_out = td.independent.Independent(td.bernoulli.Bernoulli(dec_out), 3)
 
         #print(inputs.shape)
@@ -194,6 +203,8 @@ class VAEModel(nn.Module):
         elbo = torch.mean(-(b_loss + rec_loss))
         losses['rec_loss'] = torch.mean(rec_loss)
         losses['training'] = -elbo
+
+        #print(dec_out.mean)
 
         return dec_out.mean, losses
 
