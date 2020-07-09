@@ -217,9 +217,9 @@ class VAEModel(nn.Module):
 
         log_sigma = x[..., self.config.bottleneck_bits:]
         #print(x_shape[:-1], [z_size])
-        epsilon = torch.randn(list(x_shape[:-1]) + [z_size])
-        z = mu + torch.exp(log_sigma / 2) * epsilon
-        kl = 0.5 * torch.mean(torch.exp(log_sigma) + torch.square(mu) - 1. - log_sigma)
+        epsilon = torch.randn(list(x_shape[:-1]) + [z_size]).cuda()
+        z = (mu + torch.exp(log_sigma / 2) * epsilon).cuda()
+        kl = (0.5 * torch.mean(torch.exp(log_sigma) + torch.square(mu) - 1. - log_sigma)).cuda()
         # This is the 'free bits' trick mentioned in Kingma et al. (2016)
         free_bits = self.config.free_bits
         kl_loss = torch.mean(torch.clamp_min(kl - free_bits, 0.0))
