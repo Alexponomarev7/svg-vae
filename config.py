@@ -5,6 +5,9 @@ class BaseConfig:
 
 class ImageVAEConfig(BaseConfig):
     """Basic Image VAE model hparams."""
+    def __init__(self, device='cpu'):
+        self.device = device
+
     daisy_chain_variables = False
     batch_size = 64
     hidden_size = 32

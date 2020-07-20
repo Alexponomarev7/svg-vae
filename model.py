@@ -9,42 +9,15 @@ import os
 import torch.distributions as td
 import math
 from extern.normalization import CategoricalConditionalBatchNorm
-
-
-def get_same_padding(size, kernel_size, stride):
-    def check(clen, cpad):
-        return (clen + 2 * cpad - (kernel_size - 1) - 1) // stride + 1
-
-    h_pad = 0
-    while check(size[0], h_pad) != size[0] / stride:
-        h_pad += 1
-
-    w_pad = 0
-    while check(size[1], w_pad) != size[1] / stride:
-        w_pad += 1
-
-    return h_pad, w_pad
-
-
-def get_same_padding_transpose(size, kernel_size, stride):
-    def check(clen, cpad):
-        return (clen - 1) * stride - 2 * cpad + (kernel_size - 1) + 1
-
-    h_pad = 0
-    while check(size[0], h_pad) > size[0] * stride:
-        h_pad += 1
-
-    w_pad = 0
-    while check(size[1], w_pad) > size[1] * stride:
-        w_pad += 1
-
-    return (h_pad, w_pad), size[0] * stride - check(size[0], h_pad)
+from helpers import get_same_padding, get_same_padding_transpose
 
 
 class Flatten(nn.Module):
     def forward(self, input):
         return input.flatten(start_dim=1)
 
+
+########################################################################################################################
 
 class VisualEncoderCell(nn.Module):
     def __init__(self, size, in_channels, out_channels, kernel_size, stride):
@@ -57,12 +30,12 @@ class VisualEncoderCell(nn.Module):
                                 stride=stride)
 
         # Move to CONDITIONAL INSTANCE NORM 2D
-        self.instance_norm = CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = nn.BatchNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
         conv2d = self.conv2d(input)
-        instance_norm = self.instance_norm(conv2d, labels)
+        instance_norm = self.instance_norm(conv2d)
         return self.relu(instance_norm)
 
 
@@ -108,13 +81,13 @@ class VisualDecoderCell(nn.Module):
                                          output_padding=output_padding,
                                          stride=stride)
 
-        self.instance_norm = CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = nn.BatchNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
         conv2d = self.conv2d(input)
         #print(conv2d.shape)
-        instance_norm = self.instance_norm(conv2d, labels)
+        instance_norm = self.instance_norm(conv2d)
         return self.relu(instance_norm)
 
 
@@ -196,10 +169,9 @@ class VAEModel(nn.Module):
         dec_out = self.decoder(unbottleneck, labels)
         dec_out = td.independent.Independent(td.bernoulli.Bernoulli(dec_out), 3)
 
-        #print(inputs.shape)
-
         # calculate training loss here lol
         rec_loss = -dec_out.log_prob(inputs)
+
         elbo = torch.mean(-(b_loss + rec_loss))
         losses['rec_loss'] = torch.mean(rec_loss)
         losses['training'] = -elbo
@@ -217,10 +189,80 @@ class VAEModel(nn.Module):
 
         log_sigma = x[..., self.config.bottleneck_bits:]
         #print(x_shape[:-1], [z_size])
-        epsilon = torch.randn(list(x_shape[:-1]) + [z_size]).cuda()
-        z = (mu + torch.exp(log_sigma / 2) * epsilon).cuda()
-        kl = (0.5 * torch.mean(torch.exp(log_sigma) + torch.square(mu) - 1. - log_sigma)).cuda()
+        epsilon = torch.randn(list(x_shape[:-1]) + [z_size]).to(self.config.device)
+        z = (mu + torch.exp(log_sigma / 2) * epsilon).to(self.config.device)
+        kl = (0.5 * torch.mean(torch.exp(log_sigma) + torch.square(mu) - 1. - log_sigma, dim=-1)).to(self.config.device)
         # This is the 'free bits' trick mentioned in Kingma et al. (2016)
         free_bits = self.config.free_bits
         kl_loss = torch.mean(torch.clamp_min(kl - free_bits, 0.0))
+        assert kl_loss >= 0
         return z, kl_loss * self.config.kl_beta
+
+########################################################################################################################
+
+
+class SvgDecoder(nn.Module):
+    def __init__(self, config, pretrained_vae):
+        super().__init__()
+        self.config = config
+        self.pretrained_vae = pretrained_vae
+
+    def forward(self, input):
+        sampled_bottleneck = self.pretrained_visual_encoder ## TODO: fix
+        if self.config.sg_bottleneck:
+            sampled_bottleneck = torch.stop_gradient(sampled_bottleneck)
+
+        if 'bottleneck' in features:
+            if common_layers.shape_list(features['bottleneck'])[0] == 0:
+                # return sampled_bottleneck,
+                # set losses['training'] = 0 so self.top() doesn't get called on it
+                return sampled_bottleneck, {'training': 0.0}
+            else:
+                # we want to use the given bottleneck
+                sampled_bottleneck = features['bottleneck']
+
+        # finalize bottleneck
+        unbottleneck_dim = self.config.hidden_size * 2  # twice because using LSTM
+        if self.config.twice_decoder:
+            unbottleneck_dim = unbottleneck_dim * 2
+
+        # unbottleneck back to LSTMStateTuple
+        dec_initial_state = []
+
+        for hi in range(hparams.num_hidden_layers):
+            unbottleneck = self.unbottleneck(sampled_bottleneck, unbottleneck_dim,
+                                             name_append='_{}'.format(hi))
+            dec_initial_state.append(
+                rnn.LSTMStateTuple(
+                    c=unbottleneck[:, :unbottleneck_dim // 2],
+                    h=unbottleneck[:, unbottleneck_dim // 2:]))
+
+        dec_initial_state = tuple(dec_initial_state)
+
+        shifted_targets = common_layers.shift_right(targets)
+        # Add 1 to account for the padding added to the left from shift_right
+        targets_length = common_layers.length_from_embedding(shifted_targets) + 1
+
+        # LSTM decoder
+        hparams_decoder = copy.copy(hparams)
+        if hparams.twice_decoder:
+            hparams_decoder.hidden_size = 2 * hparams.hidden_size
+
+        if hparams.mode == tf.estimator.ModeKeys.PREDICT:
+            decoder_outputs, _ = self.lstm_decoder_infer(
+                common_layers.flatten4d3d(shifted_targets),
+                targets_length, hparams_decoder, features['targets_cls'],
+                train, initial_state=dec_initial_state,
+                bottleneck=sampled_bottleneck)
+        else:
+            decoder_outputs, _ = self.lstm_decoder(
+                common_layers.flatten4d3d(shifted_targets),
+                targets_length, hparams_decoder, features['targets_cls'],
+                train, initial_state=dec_initial_state,
+                bottleneck=sampled_bottleneck)
+
+        ret = tf.expand_dims(decoder_outputs, axis=2)
+
+        return ret, losses
+
+
