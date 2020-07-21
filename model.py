@@ -12,6 +12,21 @@ from extern.normalization import CategoricalConditionalBatchNorm
 from helpers import get_same_padding, get_same_padding_transpose
 
 
+class batch_InstanceNorm2d(torch.nn.Module):
+    """
+    Conditional Instance Normalization
+    introduced in https://arxiv.org/abs/1610.07629
+    created and applied based on my limited understanding, could be improved
+    """
+    def __init__(self, style_num, in_channels):
+        super(batch_InstanceNorm2d, self).__init__()
+        self.inns = torch.nn.ModuleList([torch.nn.InstanceNorm2d(in_channels, affine=True) for i in range(style_num)])
+
+    def forward(self, x, style_id):
+        out = torch.stack([self.inns[style_id[i]](x[i].unsqueeze(0)).squeeze_(0) for i in range(len(style_id))])
+        return out
+
+
 class Flatten(nn.Module):
     def forward(self, input):
         return input.flatten(start_dim=1)
@@ -30,7 +45,7 @@ class VisualEncoderCell(nn.Module):
                                 stride=stride)
 
         # Move to CONDITIONAL INSTANCE NORM 2D
-        self.instance_norm = nn.InstanceNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = batch_InstanceNorm2d(62, out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
@@ -80,7 +95,7 @@ class VisualDecoderCell(nn.Module):
                                          output_padding=output_padding,
                                          stride=stride)
 
-        self.instance_norm = nn.InstanceNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = batch_InstanceNorm2d(62, out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
