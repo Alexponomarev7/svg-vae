@@ -20,7 +20,7 @@ class ImageVAEConfig(BaseConfig):
     bottleneck_bits = 32
 
     # loss hparams
-    kl_beta = 300
+    kl_beta = 300 #300
     free_bits_div = 4
     free_bits = 0.15
 

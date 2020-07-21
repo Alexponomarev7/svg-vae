@@ -30,7 +30,7 @@ class VisualEncoderCell(nn.Module):
                                 stride=stride)
 
         # Move to CONDITIONAL INSTANCE NORM 2D
-        self.instance_norm = nn.BatchNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = nn.InstanceNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
@@ -66,7 +66,6 @@ class VisualEncoderModel(nn.Module):
         out = self.block5(out, labels)
         out = self.block6(out, labels)
         flatten = self.flatten(out)
-        #print(flatten.shape)
         return self.dense(flatten)
 
 
@@ -81,7 +80,7 @@ class VisualDecoderCell(nn.Module):
                                          output_padding=output_padding,
                                          stride=stride)
 
-        self.instance_norm = nn.BatchNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
+        self.instance_norm = nn.InstanceNorm2d(out_channels) #CategoricalConditionalBatchNorm(out_channels, 62)
         self.relu = nn.ReLU()
 
     def forward(self, input, labels):
@@ -167,11 +166,15 @@ class VAEModel(nn.Module):
 
         # decoder.
         dec_out = self.decoder(unbottleneck, labels)
-        dec_out = td.independent.Independent(td.bernoulli.Bernoulli(dec_out), 3)
+        dec_out = td.independent.Independent(td.bernoulli.Bernoulli(logits=dec_out), 3)
 
         # calculate training loss here lol
+        #print(inputs.max())
+        #print(inputs.min())
+        #print(dec_out.mean)
         rec_loss = -dec_out.log_prob(inputs)
-
+#         print(inputs)
+#         print(dec_out)
         elbo = torch.mean(-(b_loss + rec_loss))
         losses['rec_loss'] = torch.mean(rec_loss)
         losses['training'] = -elbo
@@ -191,11 +194,14 @@ class VAEModel(nn.Module):
         #print(x_shape[:-1], [z_size])
         epsilon = torch.randn(list(x_shape[:-1]) + [z_size]).to(self.config.device)
         z = (mu + torch.exp(log_sigma / 2) * epsilon).to(self.config.device)
-        kl = (0.5 * torch.mean(torch.exp(log_sigma) + torch.square(mu) - 1. - log_sigma, dim=-1)).to(self.config.device)
+        kl = (0.5 * torch.mean(torch.exp(log_sigma) + (mu ** 2) - 1. - log_sigma, dim=-1)).to(self.config.device)
         # This is the 'free bits' trick mentioned in Kingma et al. (2016)
         free_bits = self.config.free_bits
+        kl_loss = torch.mean(kl)
         kl_loss = torch.mean(torch.clamp_min(kl - free_bits, 0.0))
         assert kl_loss >= 0
+    
+        #print("z", torch.sum(torch.abs(z)))
         return z, kl_loss * self.config.kl_beta
 
 ########################################################################################################################
